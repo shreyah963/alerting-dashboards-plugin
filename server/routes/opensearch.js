@@ -48,6 +48,19 @@ export default function (services, router, dataSourceEnabled) {
 
   router.post(
     {
+      path: '/api/alerting/_data_streams',
+      validate: {
+        body: schema.object({
+          dataStream: schema.string(),
+        }),
+        query: createValidateQuerySchema(dataSourceEnabled),
+      },
+    },
+    opensearchService.getDataStreams
+  );
+
+  router.post(
+    {
       path: '/api/alerting/_mappings',
       validate: {
         body: schema.object({
@@ -87,5 +100,15 @@ export default function (services, router, dataSourceEnabled) {
       },
     },
     opensearchService.getClusterHealth
+  );
+
+  router.get(
+    {
+      path: '/api/alerting/_version',
+      validate: {
+        query: createValidateQuerySchema(dataSourceEnabled),
+      },
+    },
+    opensearchService.getVersion
   );
 }

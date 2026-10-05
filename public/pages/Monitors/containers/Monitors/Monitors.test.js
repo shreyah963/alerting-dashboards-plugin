@@ -5,11 +5,19 @@
 
 import React from 'react';
 import { mount, shallow } from 'enzyme';
+import { act } from 'react-dom/test-utils';
 import _ from 'lodash';
 
 import Monitors from './Monitors';
 import { historyMock, httpClientMock } from '../../../../../test/mocks';
 import { AlertingFakes, setupCoreStart } from '../../../../../test/utils/helpers';
+
+// Resource-sharing availability is probed per data source; default to none so
+// unrelated tests are unaffected, and drive it explicitly in the Access-column tests.
+jest.mock('../../../../services', () => ({
+  ...jest.requireActual('../../../../services'),
+  getResourceSharingAvailableTypes: jest.fn(() => Promise.resolve([])),
+}));
 
 const alertingFakes = new AlertingFakes('random seed');
 
@@ -414,5 +422,145 @@ describe('Monitors', () => {
 
     expect(getItemId).toHaveBeenCalled();
     expect(response).toBe('item_id-143534534345');
+  });
+});
+
+describe('Monitors resource sharing Access column', () => {
+  beforeEach(() => {
+    httpClientMock.get.mockResolvedValue({ ok: true, monitors: [], totalMonitors: 0 });
+  });
+
+  // The Access column is gated on the per-data-source availability probed into
+  // component state; flush the mount probe, then set the desired state and read.
+  const buildColumnsWithTypes = async (availableTypes, dataSourceId = undefined) => {
+    const wrapper = getMountWrapper({ landingDataSourceId: dataSourceId });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      wrapper.instance().setState({ resourceSharing: { dataSourceId, types: availableTypes } });
+    });
+    wrapper.update();
+    return wrapper.instance().buildColumns();
+  };
+
+  test('adds an Access column with a share-button marker when resource sharing is available', async () => {
+    const accessColumn = (await buildColumnsWithTypes(['monitor', 'workflow'])).find(
+      (column) => column.name === 'Access'
+    );
+    expect(accessColumn).toBeDefined();
+
+    const marker = accessColumn.render('monitor-1', {
+      name: 'My Monitor',
+      monitor: { type: 'query_level_monitor' },
+    });
+    expect(marker.props['data-resource-id']).toBe('monitor-1');
+    expect(marker.props['data-resource-type']).toBe('monitor');
+    expect(marker.props['data-resource-name']).toBe('My Monitor');
+    expect(marker.props['data-resource-share-display']).toBe('icon');
+  });
+
+  test('uses the workflow resource type for composite (workflow) monitors', async () => {
+    const accessColumn = (await buildColumnsWithTypes(['monitor', 'workflow'])).find(
+      (column) => column.name === 'Access'
+    );
+
+    const marker = accessColumn.render('workflow-1', {
+      name: 'My Workflow',
+      monitor: { type: 'workflow' },
+    });
+    expect(marker.props['data-resource-id']).toBe('workflow-1');
+    expect(marker.props['data-resource-type']).toBe('workflow');
+  });
+
+  test('does not add the Access column when resource sharing is unavailable', async () => {
+    const accessColumn = (await buildColumnsWithTypes([])).find(
+      (column) => column.name === 'Access'
+    );
+    expect(accessColumn).toBeUndefined();
+  });
+
+  test('renders the Access column when only the workflow type is available', async () => {
+    const accessColumn = (await buildColumnsWithTypes(['workflow'])).find(
+      (column) => column.name === 'Access'
+    );
+    expect(accessColumn).toBeDefined();
+
+    // A composite (workflow) monitor row still gets a share-button marker.
+    const workflowMarker = accessColumn.render('workflow-1', {
+      name: 'My Workflow',
+      monitor: { type: 'workflow' },
+    });
+    expect(workflowMarker.props['data-resource-type']).toBe('workflow');
+
+    // A regular monitor row renders nothing, since the monitor type is not shared.
+    const monitorMarker = accessColumn.render('monitor-1', {
+      name: 'My Monitor',
+      monitor: { type: 'query_level_monitor' },
+    });
+    expect(monitorMarker).toBeNull();
+  });
+
+  test('discards a probe result that resolves after the data source has changed', async () => {
+    // Covers the resolve-time guard rather than the render guard: the probe for
+    // "ds-a" is still in flight when the selection moves to "ds-b", so its late
+    // result must not be written to state.
+    const { getResourceSharingAvailableTypes } = require('../../../../services');
+    let resolveDsA;
+    getResourceSharingAvailableTypes.mockImplementation((dataSourceId) =>
+      dataSourceId === 'ds-a'
+        ? new Promise((resolve) => {
+            resolveDsA = resolve;
+          })
+        : Promise.resolve([])
+    );
+
+    const wrapper = getMountWrapper({ landingDataSourceId: 'ds-a' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Switch away before the ds-a probe resolves; componentDidUpdate starts a
+    // fresh probe for ds-b.
+    await act(async () => {
+      wrapper.setProps({ landingDataSourceId: 'ds-b' });
+    });
+
+    // Now let the stale ds-a probe resolve with types that would otherwise
+    // switch the Access column on.
+    await act(async () => {
+      resolveDsA(['monitor', 'workflow']);
+      await Promise.resolve();
+    });
+    wrapper.update();
+
+    expect(wrapper.instance().state.resourceSharing.dataSourceId).not.toBe('ds-a');
+    expect(wrapper.instance().state.resourceSharing.types).not.toContain('monitor');
+
+    const accessColumn = wrapper
+      .instance()
+      .buildColumns()
+      .find((column) => column.name === 'Access');
+    expect(accessColumn).toBeUndefined();
+  });
+
+  test('does not show the Access column using a stale result resolved for a different data source', async () => {
+    // resourceSharing.dataSourceId ("ds-a") does not match the component's
+    // current landingDataSourceId ("ds-b"), simulating a data-source switch
+    // whose new probe has not resolved yet.
+    const wrapper = getMountWrapper({ landingDataSourceId: 'ds-b' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      wrapper.instance().setState({
+        resourceSharing: { dataSourceId: 'ds-a', types: ['monitor', 'workflow'] },
+      });
+    });
+    wrapper.update();
+
+    const columns = wrapper.instance().buildColumns();
+    const accessColumn = columns.find((column) => column.name === 'Access');
+    expect(accessColumn).toBeUndefined();
   });
 });

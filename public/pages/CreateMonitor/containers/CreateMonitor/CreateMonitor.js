@@ -24,7 +24,7 @@ import MonitorDetails from '../MonitorDetails';
 import ConfigureTriggers from '../../../CreateTrigger/containers/ConfigureTriggers';
 import ConfigureTriggersPpl from '../../../CreateTrigger/containers/ConfigureTriggers/ConfigureTriggersPpl';
 import WorkflowDetails from '../WorkflowDetails/WorkflowDetails';
-import { getInitialValues, getPlugins, submit } from './utils/helpers';
+import { getInitialValues, getPlugins, reinitializeForDataSource, submit } from './utils/helpers';
 import { submitPPL } from './utils/pplAlertingHelpers';
 import {
   getPerformanceModal,
@@ -66,6 +66,11 @@ export default class CreateMonitor extends Component {
         loading: false,
       },
     };
+
+    // Ref to the Formik instance so async callbacks (e.g. PPL date-field
+    // detection) can update form state via an event handler instead of during
+    // render.
+    this.formikRef = React.createRef();
 
     this.onCancel = this.onCancel.bind(this);
     this.onSubmit = this.onSubmit.bind(this);
@@ -179,13 +184,19 @@ export default class CreateMonitor extends Component {
       const monitorTypeOverrides = mustang
         ? { monitor_type: MONITOR_TYPE.PPL, searchType: SEARCH_TYPE.PPL }
         : { monitor_type: MONITOR_TYPE.QUERY_LEVEL, searchType: SEARCH_TYPE.GRAPH };
+      // Formik is mounted with enableReinitialize, so a new initialValues object resets the
+      // form. Carry over what the user has already typed into cluster-independent fields
+      // (name, description, schedule) instead of discarding it with the index-bound fields.
       this.setState({
-        initialValues: {
-          ...this.state.initialValues,
-          dataSourceId: this.props.landingDataSourceId,
-          dataSourceEndpoint: this.props.dataSourceEndpoint,
-          ...monitorTypeOverrides,
-        },
+        initialValues: reinitializeForDataSource(
+          this.state.initialValues,
+          this.formikRef.current?.values,
+          {
+            dataSourceId: this.props.landingDataSourceId,
+            dataSourceEndpoint: this.props.dataSourceEndpoint,
+            monitorTypeOverrides,
+          }
+        ),
       });
     }
   }
@@ -194,6 +205,15 @@ export default class CreateMonitor extends Component {
 
   handlePplDateFieldsChange = (dateFieldsState) => {
     this.setState({ pplDateFields: dateFieldsState });
+    // Default the timestamp field to the first detected field only when none is
+    // set yet. Done here (an event handler) rather than during render to avoid
+    // mutating form state mid-render, and guarded on "unset" so a saved field is
+    // never overwritten just because it isn't in the freshly detected list.
+    const form = this.formikRef.current;
+    const fields = dateFieldsState?.availableDateFields || [];
+    if (form && fields.length > 0 && !form.values.timestampField) {
+      form.setFieldValue('timestampField', fields[0]);
+    }
   };
 
   renderPplSchedule(values, setFieldValue) {
@@ -203,11 +223,6 @@ export default class CreateMonitor extends Component {
       error: dateFieldsError,
       loading: dateFieldsLoading,
     } = pplDateFields;
-
-    // Auto-select the first detected date field if the current value isn't in the list
-    if (availableDateFields.length > 0 && !availableDateFields.includes(values.timestampField)) {
-      setFieldValue('timestampField', availableDateFields[0]);
-    }
 
     return (
       <ContentPanel title="Schedule" titleSize="s">
@@ -223,7 +238,6 @@ export default class CreateMonitor extends Component {
           availableDateFields={availableDateFields}
           dateFieldsError={dateFieldsError}
           dateFieldsLoading={dateFieldsLoading}
-          isEdit={this.props.edit}
           isMustang={isMustangDomain(this.props.landingDataSourceId)}
         />
       </ContentPanel>
@@ -250,6 +264,7 @@ export default class CreateMonitor extends Component {
           onSubmit={this.evaluateSubmission}
           validateOnChange={false}
           enableReinitialize={true}
+          innerRef={this.formikRef}
         >
           {({ values, errors, handleSubmit, isSubmitting, isValid, touched, setFieldValue }) => {
             const isComposite = values.monitor_type === MONITOR_TYPE.COMPOSITE_LEVEL;
